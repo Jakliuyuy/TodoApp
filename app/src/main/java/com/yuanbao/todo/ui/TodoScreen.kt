@@ -1,11 +1,14 @@
 package com.yuanbao.todo.ui
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -15,6 +18,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
@@ -32,7 +37,6 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -48,10 +52,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.text.input.KeyboardActions
-import androidx.compose.ui.text.input.KeyboardOptions
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -147,9 +150,32 @@ private fun StatsHeader(done: Int, total: Int) {
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
         Spacer(modifier = Modifier.height(8.dp))
-        LinearProgressIndicator(
-            progress = progress,
-            modifier = Modifier.fillMaxWidth()
+        ProgressBar(progress = progress)
+    }
+}
+
+/**
+ * 自绘的确定型进度条。
+ * 不用 Material3 的 LinearProgressIndicator，是因为它在 1.2.x 与 1.3+ 之间
+ * 参数签名从 Float 改成了 () -> Float，跨版本不兼容；自己画最稳。
+ */
+@Composable
+private fun ProgressBar(progress: Float) {
+    val fraction = progress.coerceIn(0f, 1f)
+    val color = MaterialTheme.colorScheme.primary
+    val trackColor = MaterialTheme.colorScheme.surfaceVariant
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(6.dp)
+            .clip(RoundedCornerShape(3.dp))
+            .background(trackColor)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth(fraction)
+                .fillMaxHeight()
+                .background(color)
         )
     }
 }
@@ -249,9 +275,12 @@ private fun TaskItem(
     onEdit: () -> Unit
 ) {
     Card(
-        modifier = Modifier.fillMaxWidth(),
+        // 不用 Card 的 onClick 参数：该重载在 Material3 1.3.0 才加入，
+        // 用 Modifier.clickable 可兼容所有版本
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onEdit() },
         shape = RoundedCornerShape(12.dp),
-        onClick = onEdit,
         colors = CardDefaults.cardColors(
             containerColor = if (task.important && !task.done) {
                 MaterialTheme.colorScheme.secondaryContainer
