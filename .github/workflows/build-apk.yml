@@ -193,6 +193,23 @@ jobs:
             artifacts/TodoApp-debug.apk artifacts/TodoApp-release.apk
           echo "已发布到 https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG"
 
+      # 同时把 APK 推到 apk 分支，便于通过 codeload 直接打包下载
+      - name: 推送 APK 到 apk 分支
+        if: steps.build_debug.outputs.exit_code == '0'
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout --orphan apk
+          git rm -rf . >/dev/null 2>&1 || true
+          mkdir -p apks
+          cp artifacts/TodoApp-debug.apk apks/TodoApp-debug.apk
+          cp artifacts/TodoApp-release.apk apks/TodoApp-release.apk
+          git add -f apks
+          git commit -m "APK build #${{ github.run_number }} (${{ github.sha }})"
+          git push -f origin apk
+          echo "已推送到 apk 分支"
+
       - name: 打版本 Tag 时发布 Release
         if: startsWith(github.ref, 'refs/tags/v') && steps.build_debug.outputs.exit_code == '0'
         uses: softprops/action-gh-release@v2
