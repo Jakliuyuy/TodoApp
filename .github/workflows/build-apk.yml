@@ -14,11 +14,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 40
 
+    permissions:
+      contents: write
+
     env:
       KEYSTORE_FILE: ${{ github.workspace }}/todo-release.jks
       KEYSTORE_PASSWORD: '123456'
       KEY_ALIAS: todo
       KEY_PASSWORD: '123456'
+      # 若 runner 上没有 android-34，自动降到这个列表里可用的最高版本
+      FALLBACK_SDK: '36,35,34'
 
     steps:
       - name: 检出代码
@@ -39,17 +44,61 @@ jobs:
           key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle.kts', 'gradle/wrapper/gradle-wrapper.properties') }}
           restore-keys: ${{ runner.os }}-gradle-
 
+      # 直接写入许可哈希文件，比 `sdkmanager --licenses` 交互式接受更可靠
       - name: 接受 Android SDK 许可
         run: |
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
-          yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
-          echo "ANDROID_HOME=$ANDROID_HOME"
+          set -e
+          SDK="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          echo "SDK 路径: $SDK"
+          sudo mkdir -p "$SDK/licenses"
+          sudo chmod -R a+w "$SDK/licenses" 2>/dev/null || true
+          for h in 24333f8a63b6825ea9c5514f83c2829b004d1fee \
+                   8933bad161af4178b1185d1a37fbf41ea5269c55 \
+                   d56f5187479451eabf01fb78af6dfcb131a6481e; do
+            printf '\n%s\n' "$h" >> "$SDK/licenses/android-sdk-license"
+          done
+          printf '\n%s\n' 84831b9409646a918e30573bab4c9c91346d8abd >> "$SDK/licenses/android-sdk-preview-license"
+          echo "--- 许可文件 ---"
+          cat "$SDK/licenses/android-sdk-license"
 
-      # 仓库里不含 gradle-wrapper.jar（二进制文件），由 CI 现场生成，保证构建可复现
+      - name: 确保 Android 平台与构建工具就位
+        run: |
+          set -e
+          SDK="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          SM="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          echo "已装平台: $(ls "$SDK/platforms" 2>/dev/null | tr '\n' ' ')"
+          echo "已装构建工具: $(ls "$SDK/build-tools" 2>/dev/null | tr '\n' ' ')"
+
+          # 选一个 runner 上存在（或能装上）的平台版本
+          CHOSEN=""
+          for v in 34 35 36; do
+            if [ -d "$SDK/platforms/android-$v" ]; then CHOSEN=$v; break; fi
+          done
+          if [ -z "$CHOSEN" ] && [ -x "$SM" ]; then
+            echo "本机无 android-34/35/36，尝试安装 android-34..."
+            sudo "$SM" --install "platforms;android-34" "build-tools;34.0.0" 2>&1 | tail -20
+            [ -d "$SDK/platforms/android-34" ] && CHOSEN=34
+          fi
+          if [ -z "$CHOSEN" ]; then
+            echo "::error::找不到可用的 Android 平台（android-34/35/36 均缺失且安装失败）"
+            ls -1 "$SDK/platforms" 2>&1
+            exit 1
+          fi
+          echo "使用平台 android-$CHOSEN"
+          echo "ANDROID_PLATFORM=$CHOSEN" >> "$GITHUB_ENV"
+
+          # 构建工具缺失时补装
+          if ! ls "$SDK/build-tools" 2>/dev/null | grep -q .; then
+            echo "build-tools 缺失，尝试安装..."
+            sudo "$SM" --install "build-tools;34.0.0" 2>&1 | tail -20
+          fi
+          echo "最终 build-tools: $(ls "$SDK/build-tools" 2>/dev/null | tr '\n' ' ')"
+
       - name: 安装 Gradle 8.7
         run: |
+          set -e
           curl -sSL -o /tmp/gradle.zip https://services.gradle.org/distributions/gradle-8.7-bin.zip
-          sudo unzip -q /tmp/gradle.zip -d /opt
+          sudo unzip -q -o /tmp/gradle.zip -d /opt
           sudo ln -sf /opt/gradle-8.7/bin/gradle /usr/local/bin/gradle
           gradle --version
 
@@ -58,6 +107,7 @@ jobs:
 
       - name: 生成 Release 签名密钥
         run: |
+          set -e
           keytool -genkeypair -v \
             -keystore "$KEYSTORE_FILE" \
             -storetype JKS \
@@ -65,16 +115,26 @@ jobs:
             -keyalg RSA -keysize 2048 -validity 10950 \
             -storepass "$KEYSTORE_PASSWORD" -keypass "$KEY_PASSWORD" \
             -dname "CN=TodoApp, OU=Dev, O=Yuanbao, L=Lhasa, S=Xizang, C=CN"
+          ls -l "$KEYSTORE_FILE"
 
+      # 输出全程 tee 到文件，失败时归档到 build-logs 分支以便排查
       - name: 编译 Debug APK
+        id: build_debug
         run: |
           chmod +x ./gradlew
-          ./gradlew assembleDebug --no-daemon --stacktrace
+          set +e
+          ./gradlew assembleDebug --no-daemon --stacktrace 2>&1 | tee "$RUNNER_TEMP/debug.log"
+          code=${PIPESTATUS[0]}
+          echo "exit_code=$code"
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          exit $code
 
       - name: 编译 Release APK
-        run: ./gradlew assembleRelease --no-daemon --stacktrace
+        if: steps.build_debug.outputs.exit_code == '0'
+        run: ./gradlew assembleRelease --no-daemon --stacktrace 2>&1 | tee "$RUNNER_TEMP/release.log"
 
       - name: 整理产物
+        if: steps.build_debug.outputs.exit_code == '0'
         run: |
           mkdir -p artifacts
           cp app/build/outputs/apk/debug/app-debug.apk artifacts/TodoApp-debug.apk
@@ -82,14 +142,36 @@ jobs:
           ls -lh artifacts
 
       - name: 上传 APK 产物
+        if: steps.build_debug.outputs.exit_code == '0'
         uses: actions/upload-artifact@v4
         with:
           name: TodoApp-APK
           path: artifacts/*.apk
           retention-days: 30
 
+      # 无论成功失败都归档日志，便于无管理权限时排查
+      - name: 归档构建日志
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout --orphan build-logs
+          git rm -rf . >/dev/null 2>&1 || true
+          mkdir -p logs
+          cp "$RUNNER_TEMP/debug.log" logs/debug.log 2>/dev/null || true
+          cp "$RUNNER_TEMP/release.log" logs/release.log 2>/dev/null || true
+          {
+            echo "exit_code=${{ steps.build_debug.outputs.exit_code }}"
+            echo "platform=${{ env.ANDROID_PLATFORM }}"
+            echo "run=${{ github.run_id }}"
+            echo "commit=${{ github.sha }}"
+          } > logs/summary.txt
+          git add logs
+          git commit -m "build logs ${{ github.run_number }} ($(date -u +%Y%m%dT%H%M%SZ))" || echo "无变更，跳过"
+          git push -f origin build-logs
+
       - name: 打 Tag 时发布 Release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') && steps.build_debug.outputs.exit_code == '0'
         uses: softprops/action-gh-release@v2
         with:
           files: artifacts/*.apk
